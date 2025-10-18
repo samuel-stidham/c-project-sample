@@ -1,6 +1,10 @@
 # c-project-sample
 
-c-project-sample is an example project built on the robust [dqfan2012/c-project-skeleton-v2](https://github.com/dqfan2012/c-project-skeleton-v2). This project demonstrates a clean, modular structure for C development on Linux and macOS, with integrated static analysis, unit testing (using Check), and a streamlined Makefile workflow.
+c-project-sample is an example project built on the robust [samuel-stidham/c-project-skeleton](https://github.com/samuel-stidham/c-project-skeleton). This project demonstrates a clean, modular structure for C development on Linux and macOS, with integrated static analysis, unit testing (using Check), and a streamlined Makefile workflow.
+
+## Moved From Repo
+
+This repository was moved from [dqfan2012/c-project-skeleton](https://github.com/dqfan2012/c-project-skeleton)
 
 ## Overview
 
@@ -17,11 +21,11 @@ c-project-sample is an example project built on the robust [dqfan2012/c-project-
 
 1. **Clone the Repository:**
 
-   git clone https://github.com/dqfan2012/c-project-sample.git
+   git clone https://github.com/samuel-stidham/c-project-sample.git
    cd c-project-sample
 
 2. **Set Up Your Environment:**
-   Ensure you have a C compiler (gcc or clang), GNU Make, and the required tools installed (refer to [dqfan2012/c-project-skeleton-v2](https://github.com/dqfan2012/c-project-skeleton-v2) for more details).
+   Ensure you have a C compiler (gcc or clang), GNU Make, and the required tools installed (refer to [samuel-stidham/c-project-skeleton](https://github.com/samuel-stidham/c-project-skeleton) for more details).
 
 3. **Build and Test:**
 
@@ -45,7 +49,7 @@ c-project-sample is an example project built on the robust [dqfan2012/c-project-
 
 ## Customization
 
-This starter is provided as an example of how to use [dqfan2012/c-project-skeleton-v2](https://github.com/dqfan2012/c-project-skeleton-v2).
+This starter is provided as an example of how to use [samuel-stidham/c-project-skeleton](https://github.com/samuel-stidham/c-project-skeleton).
 
 ## License
 
