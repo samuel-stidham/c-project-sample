@@ -1,292 +1,238 @@
-###############################################################################
-# c-project-sample Makefile
-#
-# This Makefile supports Linux and macOS. It supports gcc and clang, and
-# defines debug and release builds along with targets for formatting,
-# static analysis, sanitizers, profiling, and testing.
-#
-# For parallel builds, use:
-#   make -j$(shell nproc) debug
-###############################################################################
+# c-project-sample verb layer over CMake + Ninja. The build itself lives
+# in CMakeLists.txt; this Makefile only provides the daily verbs.
 
-# Phony targets
-.PHONY: all debug release clean format debugger \
-        clang-analyze clang-tidy cppcheck flawfinder splint dependency-check \
-        asan fuzz lsan tsan ubsan llvm-coverage \
-        valgrind-memcheck valgrind-cachegrind valgrind-callgrind valgrind-massif \
-        test quality
-
-###############################################################################
-# Project Configuration
-###############################################################################
-PROJECT = c-project-sample
-
-###############################################################################
-# OS and Compiler Settings
-###############################################################################
-OS := $(shell uname)
-
-# Default compiler (override with "make CC=clang" if desired)
-ifndef CC
-  ifeq ($(OS), Darwin)
-    CC = clang
+# Default compiler (override: make debug CC=gcc).
+# Make predefines CC (to cc), so `?=` would never take effect. Only override
+# that built-in default — respect an explicit command-line or environment CC.
+ifeq ($(origin CC),default)
+  ifeq ($(shell uname),Darwin)
+    CC := clang
   else
-    CC = gcc
+    CC := gcc
   endif
 endif
 
-# Basic C flags (applied to all builds)
-COMMON_CFLAGS = -std=c17 -Wall -Werror -Wextra -Wpedantic -Wconversion \
-                -Wno-sign-compare -Wno-unused-parameter -Wno-unused-variable \
-                -Wshadow -Wformat=2 -Wmissing-include-dirs -Wswitch-enum \
-                -Wfloat-equal -Wredundant-decls -Wnull-dereference \
-                -Wold-style-definition -Wdouble-promotion -Wshift-overflow \
-                -Wstrict-aliasing=2 -Wformat-nonliteral
+COMPILER_NAME := $(shell basename $(CC))
 
-# Optionally add these if not enabled by -Wall:
-# COMMON_CFLAGS += -Wpointer-arith -Winit-self
-
-# Debug and Production flags (in addition to COMMON_CFLAGS)
-DEBUG_CFLAGS = -fno-strict-aliasing -gdwarf-4 -g3 -O0 \
-               -Wstack-protector -fstack-protector-all -Wformat-security \
-               -Wswitch-default
-
-PROD_CFLAGS  = -O2
-
-# Compiler-specific additional flags
-COMMON_GCC_CFLAGS   = -Wlogical-op -Wstrict-overflow=5 -Wformat-overflow=2 \
-                      -Wformat-truncation=2 -Wstack-usage=1024
-COMMON_CLANG_CFLAGS = -Wlogical-not-parentheses -Wlogical-op-parentheses
-DEBUG_CFLAGS_GCC    = -fmax-errors=1
-DEBUG_CFLAGS_CLANG  = -ferror-limit=1 -Wno-gnu-folding-constant
-
-ifeq ($(CC),gcc)
-  COMMON_CFLAGS += $(COMMON_GCC_CFLAGS)
-  DEBUG_CFLAGS  += $(DEBUG_CFLAGS_GCC)
-else ifeq ($(CC),clang)
-  COMMON_CFLAGS += $(COMMON_CLANG_CFLAGS)
-  DEBUG_CFLAGS  += $(DEBUG_CFLAGS_CLANG)
-endif
-
-# Add include directory flag
-COMMON_CFLAGS += -Iinclude
-
-# Final flag sets for each build type
-DEBUG_CFLAGS := $(COMMON_CFLAGS) $(DEBUG_CFLAGS)
-PROD_CFLAGS  := $(COMMON_CFLAGS) $(PROD_CFLAGS)
-
-###############################################################################
-# Directories and Files
-###############################################################################
-SRC_DIR      = src
-INCLUDE_DIR  = include
-BUILD_DIR    = build
-BIN_DIR      = bin
-TEST_DIR     = tests
-
-# Final executable name
-EXEC         = $(BIN_DIR)/main
-
-# Source and object files
-SRCS         = $(wildcard $(SRC_DIR)/*.c)
-OBJS         = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRCS))
-
-###############################################################################
-# Debugger Settings
-###############################################################################
-# Use lldb on macOS, gdb on Linux (can override with DEBUGGER=...)
-ifeq ($(OS), Darwin)
-  DEBUGGER ?= lldb
+# Build configuration: debug (default) or release, each in its own dir so the
+# two never clobber each other. Per-config flags live in CMakeLists.txt
+# (CMAKE_C_FLAGS_DEBUG / _RELEASE).
+BUILD_TYPE ?= debug
+ifeq ($(BUILD_TYPE),debug)
+CMAKE_BUILD_TYPE := Debug
+else ifeq ($(BUILD_TYPE),release)
+CMAKE_BUILD_TYPE := Release
 else
-  DEBUGGER ?= gdb
+$(error BUILD_TYPE must be 'debug' or 'release', got '$(BUILD_TYPE)')
 endif
 
-###############################################################################
-# Build Targets
-###############################################################################
+BUILD_DIR := build-$(COMPILER_NAME)-$(BUILD_TYPE)
+BIN       := $(BUILD_DIR)/c-project-sample
+TESTBIN   := $(BUILD_DIR)/tests_runner
+
+# The app reads a calculation from stdin, so the non-interactive targets
+# (sanitizers, coverage, valgrind profiling) feed it this sample input.
+SAMPLE_INPUT := 3 + 4
+
+.PHONY: all setup build rebuild run debug release prod test compile-db \
+        format lint tidy analyze gcc-analyze cppcheck flawfinder dependency-check \
+        asan ubsan tsan lsan sanitizers llvm-coverage \
+        valgrind-memcheck valgrind-cachegrind valgrind-callgrind valgrind-massif \
+        quality clean distclean
+
 all: debug
 
-debug: CFLAGS := $(DEBUG_CFLAGS)
-debug: $(EXEC)
+setup:
+	@echo "Configuring CMake in $(BUILD_DIR) (CC=$(CC), $(CMAKE_BUILD_TYPE))"
+	cmake -S . -B $(BUILD_DIR) -G Ninja \
+		-DCMAKE_C_COMPILER=$(CC) \
+		-DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
 
-release: CFLAGS := $(PROD_CFLAGS)
-release: $(EXEC)
+# build configures first, so every verb works on a fresh clone.
+build: setup
+	cmake --build $(BUILD_DIR)
 
-$(EXEC): $(OBJS)
-	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) $^ -o $@
+rebuild: setup build
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
-	@mkdir -p $(BUILD_DIR)
-	# Automatic dependency generation added via -MMD -MP
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+# Config shortcuts. `debug` / `release` build the respective configuration
+# into its own dir (build-<compiler>-<type>). Everything else keys off
+# BUILD_TYPE, e.g. `make run BUILD_TYPE=release`. `prod` aliases `release`.
+debug:
+	@$(MAKE) --no-print-directory BUILD_TYPE=debug rebuild
+release prod:
+	@$(MAKE) --no-print-directory BUILD_TYPE=release rebuild
 
-###############################################################################
-# Test Targets
-###############################################################################
-# Define test sources and objects
-TEST_SRCS  = $(wildcard $(TEST_DIR)/*.c)
-TEST_OBJS  = $(patsubst $(TEST_DIR)/%.c, $(BUILD_DIR)/%.test.o, $(TEST_SRCS))
-TEST_EXEC  = $(BIN_DIR)/tests_runner
+run: rebuild
+	"$(BIN)"
 
-# Libraries required for Check. Adjust if necessary on your system.
-CHECK_LIBS = -lcheck -lm -lpthread -lsubunit
+# Build and run the test suite via ctest.
+test: rebuild
+	ctest --test-dir $(BUILD_DIR) --output-on-failure
 
-# Target to compile and run tests
-test: CFLAGS := $(DEBUG_CFLAGS)
-test: $(TEST_EXEC)
-	@echo "Running tests..."
-	./$(TEST_EXEC)
-
-$(TEST_EXEC): $(TEST_OBJS) $(filter-out $(BUILD_DIR)/main.o, $(OBJS))
-	@mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) $^ $(CHECK_LIBS) -o $@
-
-$(BUILD_DIR)/%.test.o: $(TEST_DIR)/%.c
-	@mkdir -p $(BUILD_DIR)
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+# Generate compile_commands.json and symlink it to the repo root for clangd.
+# CMake emits it at configure time, so `setup` is enough — no build required.
+compile-db: setup
+	@ln -sf $(BUILD_DIR)/compile_commands.json compile_commands.json
+	@echo "compile_commands.json -> $(BUILD_DIR)/compile_commands.json"
 
 ###############################################################################
-# Format code using clang-format
+# Formatting and static analysis
+#
+# Homebrew LLVM is keg-only and deliberately NOT on PATH, so it never
+# shadows Apple clang. These variables reach into the keg explicitly when it
+# exists and fall back to PATH lookups elsewhere (Linux, CI). The compiler
+# default stays Apple clang; only the tooling comes from Homebrew LLVM.
+# clang-format ships as its own Homebrew formula and lives on PATH.
+# Environment overrides win (exported from ~/fish/env.fish on macOS), then
+# the Homebrew LLVM keg, then PATH.
 ###############################################################################
+LLVM_PREFIX ?= $(shell brew --prefix llvm 2>/dev/null)
+ifneq ($(wildcard $(LLVM_PREFIX)/bin/clang-tidy),)
+  CLANG_TIDY    ?= $(LLVM_PREFIX)/bin/clang-tidy
+  SCAN_BUILD    ?= $(LLVM_PREFIX)/bin/scan-build
+  LLVM_COV      ?= $(LLVM_PREFIX)/bin/llvm-cov
+  LLVM_PROFDATA ?= $(LLVM_PREFIX)/bin/llvm-profdata
+  COVERAGE_CC   ?= $(LLVM_PREFIX)/bin/clang
+else
+  CLANG_TIDY    ?= clang-tidy
+  SCAN_BUILD    ?= scan-build
+  LLVM_COV      ?= llvm-cov
+  LLVM_PROFDATA ?= llvm-profdata
+  COVERAGE_CC   ?= clang
+endif
+CLANG_FORMAT ?= clang-format
+
+SRCS := $(wildcard src/*.c) $(wildcard tests/*.c)
+
 format:
-	clang-format -i $(SRC_DIR)/*.c $(INCLUDE_DIR)/*.h
+	find src include tests \( -name '*.c' -o -name '*.h' \) -exec $(CLANG_FORMAT) -i {} +
 
-###############################################################################
-# Launch debugger (gdb or lldb) on the executable
-###############################################################################
-debugger:
-	$(DEBUGGER) $(EXEC)
+# clang-tidy, driven by .clang-tidy + compile_commands.json. The
+# clang-analyzer-* checks run as part of this. Homebrew clang-tidy does not
+# know the macOS SDK location, so pass the sysroot explicitly on Darwin.
+ifeq ($(shell uname),Darwin)
+  TIDY_EXTRA := --extra-arg=-isysroot --extra-arg=$(shell xcrun --show-sdk-path)
+endif
 
-###############################################################################
-# Additional Targets for Static Analysis, Sanitizers, and Profiling
-###############################################################################
+tidy: rebuild
+	$(CLANG_TIDY) $(TIDY_EXTRA) -p $(BUILD_DIR) $(SRCS)
 
-# --- Clang-Based Tools ---
-# (Static Analysis, Sanitizers, and Coverage with clang/LLVM)
+# Friendly alias.
+lint: tidy
 
-# Tools and flags
-CLANG_ANALYZER  = clang --analyze
-CLANG_TIDY      = clang-tidy
-ASAN_FLAGS      = -fsanitize=address -fno-omit-frame-pointer
-FUZZER_FLAGS    = -fsanitize=fuzzer
-LSAN_FLAGS      = -fsanitize=leak
-TSAN_FLAGS      = -fsanitize=thread
-UBSAN_FLAGS     = -fsanitize=undefined
-COVERAGE_FLAGS  = -fprofile-arcs -ftest-coverage
-LLVM_COV        = llvm-cov
-LLVM_PROFDATA   = llvm-profdata
+# Clang static analyzer via scan-build over a fresh build: path-sensitive,
+# cross-statement analysis with an HTML report. Deeper and slower than
+# `tidy`; complements it.
+analyze:
+	rm -rf build-scan
+	$(SCAN_BUILD) --use-cc=clang \
+		cmake -S . -B build-scan -G Ninja -DCMAKE_C_COMPILER=clang
+	$(SCAN_BUILD) --use-cc=clang -o build-scan/report \
+		cmake --build build-scan
 
-# Targets using clang-based tools
-clang-analyze:
-	$(CLANG_ANALYZER) $(SRCS) -Iinclude
+# GCC's built-in static analyzer (-fanalyzer): a different engine from
+# Clang's, actively developed. `-k 0` keeps ninja going so every finding is
+# reported before -Werror fails the build. Needs a real GCC: native on
+# Linux, or "brew install gcc" on macOS, then: make gcc-analyze GCC=gcc-16
+GCC ?= gcc
 
-clang-tidy:
-	$(CLANG_TIDY) $(SRCS) -- -std=c17 -Iinclude
+gcc-analyze:
+	cmake -S . -B build-gcc-analyze -G Ninja -DCMAKE_C_COMPILER=$(GCC) \
+		-DCMAKE_C_FLAGS="-fanalyzer"
+	cmake --build build-gcc-analyze -- -k 0
 
-# Sanitizer targets
-asan: CFLAGS += $(ASAN_FLAGS)
-asan: clean debug
-	./$(EXEC)
-
-fuzz: CFLAGS += $(FUZZER_FLAGS)
-fuzz: clean debug
-	./$(EXEC)
-
-lsan: CFLAGS += $(LSAN_FLAGS)
-lsan: clean debug
-	./$(EXEC)
-
-tsan: CFLAGS += $(TSAN_FLAGS)
-tsan: clean debug
-	./$(EXEC)
-
-ubsan: CFLAGS += $(UBSAN_FLAGS)
-ubsan: clean debug
-	./$(EXEC)
-
-llvm-coverage: clean
-	@echo "Building with coverage instrumentation..."
-	@mkdir -p coverage/html
-
-	$(MAKE) CC=clang CFLAGS="$(DEBUG_CFLAGS) -fprofile-instr-generate -fcoverage-mapping" debug
-	$(MAKE) CC=clang CFLAGS="$(DEBUG_CFLAGS) -fprofile-instr-generate -fcoverage-mapping" test
-
-	LLVM_PROFILE_FILE="coverage/main.profraw" ./bin/main
-	LLVM_PROFILE_FILE="coverage/tests.profraw" ./bin/tests_runner
-
-	$(LLVM_PROFDATA) merge -sparse coverage/*.profraw -o coverage/combined.profdata
-
-	$(LLVM_COV) show \
-		./bin/main \
-		./bin/tests_runner \
-		--instr-profile=coverage/combined.profdata \
-		--format=html \
-		--output-dir=coverage/html \
-		src/ \
-		tests/
-
-	@echo "Coverage report generated at coverage/html. Open coverage/html/index.html in a browser."
-
-
-# --- Valgrind-Based Tools (Linux Only) ---
-VALGRIND_MEMCHECK   = valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes
-VALGRIND_CACHEGRIND = valgrind --tool=cachegrind
-VALGRIND_CALLGRIND  = valgrind --tool=callgrind
-VALGRIND_MASSIF     = valgrind --tool=massif
-VALGRIND_SGCHECK    = valgrind --tool=exp-sgcheck
-
-valgrind-memcheck: $(EXEC)
-	$(VALGRIND_MEMCHECK) ./$(EXEC)
-
-valgrind-cachegrind: $(EXEC)
-	$(VALGRIND_CACHEGRIND) ./$(EXEC)
-
-valgrind-callgrind: $(EXEC)
-	$(VALGRIND_CALLGRIND) ./$(EXEC)
-
-valgrind-massif: $(EXEC)
-	$(VALGRIND_MASSIF) ./$(EXEC)
-
-# --- Other Analysis Tools ---
-CPPCHECK         = cppcheck
-DEPENDENCYCHECK  = $(HOME)/dependency-check/bin/dependency-check.sh
-FLAWFINDER       = flawfinder
-INFER						 = infer
-SPLINT           = splint
-
+# cppcheck understands c23 directly.
 cppcheck:
-	$(CPPCHECK) --enable=all --inconclusive -Iinclude --std=c17 --suppress=missingIncludeSystem --quiet $(SRCS) 2> cppcheck-report.txt
+	cppcheck --enable=all --inconclusive --std=c23 -Iinclude \
+		--suppress=missingIncludeSystem src tests
+
+flawfinder:
+	flawfinder src tests
 
 dependency-check:
 	@echo "Running OWASP Dependency Check..."
-	$(DEPENDENCYCHECK) --project $(PROJECT) --scan . --format HTML --out dependency-check-report.html
+	$(HOME)/dependency-check/bin/dependency-check.sh --project c-project-sample \
+		--scan . --format HTML --out dependency-check-report.html
 	@echo "Dependency Check report generated: dependency-check-report.html"
 
-flawfinder:
-	$(FLAWFINDER) $(SRCS)
-
-infer:
-	$(INFER) run -- make
-
-splint:
-	$(SPLINT) $(SRCS) -Iinclude
-
-###############################################################################
-# Quality Target
-###############################################################################
-# Runs all static analysis tools in sequence.
-quality: clang-analyze clang-tidy cppcheck flawfinder splint infer
+# Runs the static analysis tools in sequence. gcc-analyze is separate
+# because it needs a real GCC.
+quality: tidy cppcheck flawfinder
 	@echo "Quality checks complete."
+
+###############################################################################
+# Sanitizers. Each builds instrumented binaries in its own build-<name>/ via
+# a fresh CMake configure, then runs the test runner and the app under it.
+#
+# No fuzz target: -fsanitize=fuzzer needs an LLVMFuzzerTestOneInput harness,
+# not a regular main.
+#
+# Note: Apple clang does not support -fsanitize=leak. On macOS, install LLVM
+# with "brew install llvm" and run:
+#   make lsan CC="$(brew --prefix llvm)/bin/clang"
+#
+# lsan alone runs the tests with CK_FORK=no. Check's fork mode leaves the
+# parent's live allocations visible in every child, and standalone
+# LeakSanitizer reports them as leaks at child exit. The other sanitizers
+# keep fork mode, which signal and exit tests require.
+###############################################################################
+asan:  SAN := address
+ubsan: SAN := undefined
+tsan:  SAN := thread
+lsan:  SAN := leak
+lsan:  SAN_TEST_ENV := CK_FORK=no
+
+asan ubsan tsan lsan:
+	cmake -S . -B build-$@ -G Ninja -DCMAKE_C_COMPILER=$(CC) \
+		-DCMAKE_C_FLAGS="-fsanitize=$(SAN) -fno-omit-frame-pointer" \
+		-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$(SAN)"
+	cmake --build build-$@
+	$(SAN_TEST_ENV) ./build-$@/tests_runner
+	echo "$(SAMPLE_INPUT)" | ./build-$@/c-project-sample
+
+# Build and run every sanitizer in turn.
+sanitizers: asan ubsan tsan lsan
+
+###############################################################################
+# LLVM code coverage
+###############################################################################
+# Compiles with the same LLVM the llvm-cov/llvm-profdata tools come from, so
+# the profraw format always matches.
+llvm-coverage:
+	rm -rf build-coverage coverage
+	@mkdir -p coverage/html
+	cmake -S . -B build-coverage -G Ninja -DCMAKE_C_COMPILER=$(COVERAGE_CC) \
+		-DCMAKE_C_FLAGS="-fprofile-instr-generate -fcoverage-mapping"
+	cmake --build build-coverage
+	echo "$(SAMPLE_INPUT)" | LLVM_PROFILE_FILE="coverage/main.profraw" ./build-coverage/c-project-sample
+	LLVM_PROFILE_FILE="coverage/tests.profraw" ./build-coverage/tests_runner
+	$(LLVM_PROFDATA) merge -sparse coverage/*.profraw -o coverage/combined.profdata
+	$(LLVM_COV) show ./build-coverage/c-project-sample ./build-coverage/tests_runner \
+		--instr-profile=coverage/combined.profdata --format=html \
+		--output-dir=coverage/html src/ tests/
+	@echo "Coverage report generated at coverage/html. Open coverage/html/index.html in a browser."
+
+###############################################################################
+# Valgrind-Based Tools (Linux Only)
+###############################################################################
+valgrind-memcheck: rebuild
+	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes "$(TESTBIN)"
+
+valgrind-cachegrind: rebuild
+	echo "$(SAMPLE_INPUT)" | valgrind --tool=cachegrind "$(BIN)"
+
+valgrind-callgrind: rebuild
+	echo "$(SAMPLE_INPUT)" | valgrind --tool=callgrind "$(BIN)"
+
+valgrind-massif: rebuild
+	echo "$(SAMPLE_INPUT)" | valgrind --tool=massif "$(BIN)"
 
 ###############################################################################
 # Clean Targets
 ###############################################################################
 clean:
-	rm -rf $(BUILD_DIR) $(BIN_DIR)
+	cmake --build $(BUILD_DIR) --target clean || true
 
-###############################################################################
-# Dependency File Inclusion
-###############################################################################
--include $(OBJS:.o=.d)
--include $(TEST_OBJS:.test.o=.d)
+distclean:
+	rm -rf build-* coverage
+	rm -f compile_commands.json
